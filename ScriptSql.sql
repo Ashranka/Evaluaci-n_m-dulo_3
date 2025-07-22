@@ -270,3 +270,604 @@ UNION ALL
 SELECT 'TRANSACCIONES' AS Tabla, COUNT(*) AS Registros FROM Transacciones;
 
 
+-- ================================================
+-- CONSULTAS SQL - SISTEMA DE INVENTARIO
+-- ================================================
+
+USE SistemaInventario;
+
+-- ================================================
+-- 1. CONSULTAS BÁSICAS
+-- ================================================
+
+-- 1.1 Recuperar todos los productos disponibles en inventario
+SELECT
+    ID_Producto,
+    Nombre,
+    Descripcion,
+    Precio,
+    Cantidad_Inventario,
+    CASE
+        WHEN Cantidad_Inventario = 0 THEN 'Sin Stock'
+        WHEN Cantidad_Inventario <= 5 THEN 'Stock Bajo'
+        WHEN Cantidad_Inventario <= 15 THEN 'Stock Medio'
+        ELSE 'Stock Alto'
+    END AS Estado_Stock
+FROM Productos
+WHERE Estado = 'ACTIVO'
+ORDER BY Cantidad_Inventario ASC;
+
+-- 1.2 Recuperar proveedores que suministran productos específicos
+SELECT DISTINCT
+    pr.ID_Proveedor,
+    pr.Nombre AS Proveedor,
+    pr.Telefono,
+    pr.Email,
+    p.Nombre AS Producto,
+    pp.Precio_Proveedor,
+    pp.Tiempo_Entrega
+FROM Proveedores pr
+INNER JOIN Producto_Proveedor pp ON pr.ID_Proveedor = pp.ID_Proveedor
+INNER JOIN Productos p ON pp.ID_Producto = p.ID_Producto
+WHERE p.Nombre LIKE '%Laptop%' OR p.Nombre LIKE '%Monitor%'
+ORDER BY pr.Nombre, p.Nombre;
+
+-- 1.3 Transacciones realizadas en fecha específica
+SELECT
+    t.ID_Transaccion,
+    p.Nombre AS Producto,
+    pr.Nombre AS Proveedor,
+    t.Tipo,
+    t.Cantidad,
+    t.Precio_Unitario,
+    t.Total,
+    t.Observaciones
+FROM Transacciones t
+INNER JOIN Productos p ON t.ID_Producto = p.ID_Producto
+INNER JOIN Proveedores pr ON t.ID_Proveedor = pr.ID_Proveedor
+WHERE DATE(t.Fecha) = '2024-06-10'
+ORDER BY t.Fecha;
+
+-- ================================================
+-- 2. CONSULTAS CON FUNCIONES DE AGRUPACIÓN
+-- ================================================
+
+-- 2.1 Número total de productos vendidos por producto
+SELECT
+    p.Nombre AS Producto,
+    COUNT(t.ID_Transaccion) AS Num_Transacciones_Venta,
+    SUM(t.Cantidad) AS Total_Vendido,
+    AVG(t.Precio_Unitario) AS Precio_Promedio_Venta,
+    SUM(t.Total) AS Ingresos_Totales
+FROM Productos p
+LEFT JOIN Transacciones t ON p.ID_Producto = t.ID_Producto AND t.Tipo = 'VENTA'
+GROUP BY p.ID_Producto, p.Nombre
+ORDER BY Total_Vendido DESC;
+
+-- 2.2 Valor total de compras por proveedor
+SELECT
+    pr.Nombre AS Proveedor,
+    COUNT(t.ID_Transaccion) AS Num_Compras,
+    SUM(t.Cantidad) AS Total_Productos_Comprados,
+    SUM(t.Total) AS Total_Gastado,
+    AVG(t.Total) AS Promedio_Por_Compra
+FROM Proveedores pr
+INNER JOIN Transacciones t ON pr.ID_Proveedor = t.ID_Proveedor
+WHERE t.Tipo = 'COMPRA'
+GROUP BY pr.ID_Proveedor, pr.Nombre
+ORDER BY Total_Gastado DESC;
+
+-- 2.3 Resumen mensual de transacciones
+SELECT
+    YEAR(Fecha) AS Año,
+    MONTH(Fecha) AS Mes,
+    MONTHNAME(Fecha) AS Nombre_Mes,
+    Tipo,
+    COUNT(*) AS Num_Transacciones,
+    SUM(Cantidad) AS Total_Productos,
+    SUM(Total) AS Valor_Total
+FROM Transacciones
+GROUP BY YEAR(Fecha), MONTH(Fecha), Tipo
+ORDER BY Año, Mes, Tipo;
+
+-- ================================================
+-- 3. CONSULTAS COMPLEJAS CON JOINS
+-- ================================================
+
+-- 3.1 Total de ventas de productos durante el mes anterior
+SELECT
+    p.ID_Producto,
+    p.Nombre AS Producto,
+    p.Precio AS Precio_Actual,
+    COALESCE(SUM(t.Cantidad), 0) AS Cantidad_Vendida,
+    COALESCE(SUM(t.Total), 0) AS Ingresos_Generados,
+    p.Cantidad_Inventario AS Stock_Actual
+FROM Productos p
+LEFT JOIN Transacciones t ON p.ID_Producto = t.ID_Producto
+    AND t.Tipo = 'VENTA'
+    AND t.Fecha >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH)
+    AND t.Fecha < CURDATE()
+GROUP BY p.ID_Producto, p.Nombre, p.Precio, p.Cantidad_Inventario
+ORDER BY Ingresos_Generados DESC;
+
+-- 3.2 Análisis completo de productos con proveedores (INNER y LEFT JOIN)
+SELECT
+    p.ID_Producto,
+    p.Nombre AS Producto,
+    p.Precio,
+    p.Cantidad_Inventario,
+    pr.Nombre AS Proveedor,
+    pp.Precio_Proveedor,
+    pp.Tiempo_Entrega,
+    (p.Precio - pp.Precio_Proveedor) AS Margen_Ganancia,
+    ROUND(((p.Precio - pp.Precio_Proveedor) / pp.Precio_Proveedor) * 100, 2) AS Porcentaje_Margen
+FROM Productos p
+LEFT JOIN Producto_Proveedor pp ON p.ID_Producto = pp.ID_Producto AND pp.Estado = 'ACTIVO'
+LEFT JOIN Proveedores pr ON pp.ID_Proveedor = pr.ID_Proveedor
+WHERE p.Estado = 'ACTIVO'
+ORDER BY Porcentaje_Margen DESC;
+
+-- ================================================
+-- 4. SUBCONSULTAS (SUBQUERIES)
+-- ================================================
+
+-- 4.1 Productos que no se han vendido en los últimos 30 días
+SELECT
+    p.ID_Producto,
+    p.Nombre,
+    p.Precio,
+    p.Cantidad_Inventario,
+    p.Fecha_Creacion
+FROM Productos p
+WHERE p.ID_Producto NOT IN (
+    SELECT DISTINCT t.ID_Producto
+    FROM Transacciones t
+    WHERE t.Tipo = 'VENTA'
+    AND t.Fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+)
+AND p.Estado = 'ACTIVO'
+ORDER BY p.Cantidad_Inventario DESC;
+
+-- 4.2 Proveedores con precios por encima del promedio
+SELECT
+    pr.Nombre AS Proveedor,
+    p.Nombre AS Producto,
+    pp.Precio_Proveedor
+FROM Proveedores pr
+INNER JOIN Producto_Proveedor pp ON pr.ID_Proveedor = pp.ID_Proveedor
+INNER JOIN Productos p ON pp.ID_Producto = p.ID_Producto
+WHERE pp.Precio_Proveedor > (
+    SELECT AVG(pp2.Precio_Proveedor)
+    FROM Producto_Proveedor pp2
+    WHERE pp2.ID_Producto = pp.ID_Producto
+    AND pp2.Estado = 'ACTIVO'
+)
+AND pp.Estado = 'ACTIVO'
+ORDER BY pp.Precio_Proveedor DESC;
+
+-- 4.3 Top 3 productos más vendidos
+SELECT
+    p.Nombre AS Producto,
+    SUM(t.Cantidad) AS Total_Vendido,
+    SUM(t.Total) AS Ingresos_Totales
+FROM Productos p
+INNER JOIN Transacciones t ON p.ID_Producto = t.ID_Producto
+WHERE t.Tipo = 'VENTA'
+GROUP BY p.ID_Producto, p.Nombre
+ORDER BY Total_Vendido DESC
+LIMIT 3;
+
+-- ================================================
+-- 5. CONSULTAS DE ANÁLISIS AVANZADO
+-- ================================================
+
+-- 5.1 Análisis de rotación de inventario
+SELECT
+    p.Nombre AS Producto,
+    p.Cantidad_Inventario AS Stock_Actual,
+    COALESCE(ventas.Total_Vendido, 0) AS Total_Vendido,
+    COALESCE(compras.Total_Comprado, 0) AS Total_Comprado,
+    CASE
+        WHEN p.Cantidad_Inventario > 0 AND ventas.Total_Vendido > 0
+        THEN ROUND(ventas.Total_Vendido / p.Cantidad_Inventario, 2)
+        ELSE 0
+    END AS Rotacion_Inventario,
+    CASE
+        WHEN ventas.Total_Vendido > p.Cantidad_Inventario THEN 'Alta Rotación'
+        WHEN ventas.Total_Vendido > (p.Cantidad_Inventario * 0.5) THEN 'Rotación Media'
+        WHEN ventas.Total_Vendido > 0 THEN 'Baja Rotación'
+        ELSE 'Sin Movimiento'
+    END AS Clasificacion_Rotacion
+FROM Productos p
+LEFT JOIN (
+    SELECT ID_Producto, SUM(Cantidad) AS Total_Vendido
+    FROM Transacciones
+    WHERE Tipo = 'VENTA'
+    AND Fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+    GROUP BY ID_Producto
+) ventas ON p.ID_Producto = ventas.ID_Producto
+LEFT JOIN (
+    SELECT ID_Producto, SUM(Cantidad) AS Total_Comprado
+    FROM Transacciones
+    WHERE Tipo = 'COMPRA'
+    AND Fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+    GROUP BY ID_Producto
+) compras ON p.ID_Producto = compras.ID_Producto
+WHERE p.Estado = 'ACTIVO'
+ORDER BY Rotacion_Inventario DESC;
+
+-- 5.2 Rentabilidad por producto
+SELECT
+    p.Nombre AS Producto,
+    COALESCE(ventas.Ingresos_Ventas, 0) AS Ingresos_Ventas,
+    COALESCE(compras.Costo_Compras, 0) AS Costo_Compras,
+    (COALESCE(ventas.Ingresos_Ventas, 0) - COALESCE(compras.Costo_Compras, 0)) AS Ganancia_Bruta,
+    CASE
+        WHEN compras.Costo_Compras > 0 THEN
+            ROUND(((ventas.Ingresos_Ventas - compras.Costo_Compras) / compras.Costo_Compras) * 100, 2)
+        ELSE 0
+    END AS ROI_Porcentaje
+FROM Productos p
+LEFT JOIN (
+    SELECT
+        ID_Producto,
+        SUM(Total) AS Ingresos_Ventas,
+        SUM(Cantidad) AS Cantidad_Vendida
+    FROM Transacciones
+    WHERE Tipo = 'VENTA'
+    GROUP BY ID_Producto
+) ventas ON p.ID_Producto = ventas.ID_Producto
+LEFT JOIN (
+    SELECT
+        ID_Producto,
+        SUM(Total) AS Costo_Compras,
+        SUM(Cantidad) AS Cantidad_Comprada
+    FROM Transacciones
+    WHERE Tipo = 'COMPRA'
+    GROUP BY ID_Producto
+) compras ON p.ID_Producto = compras.ID_Producto
+WHERE p.Estado = 'ACTIVO'
+ORDER BY Ganancia_Bruta DESC;
+
+-- ================================================
+-- 6. CONSULTAS DE CONTROL Y ALERTAS
+-- ================================================
+
+-- 6.1 Productos con stock bajo (menos de 10 unidades)
+SELECT
+    p.ID_Producto,
+    p.Nombre,
+    p.Cantidad_Inventario,
+    DATEDIFF(CURDATE(), MAX(t.Fecha)) AS Dias_Sin_Movimiento,
+    'ALERTA: Stock Bajo' AS Mensaje
+FROM Productos p
+LEFT JOIN Transacciones t ON p.ID_Producto = t.ID_Producto
+WHERE p.Cantidad_Inventario < 10
+AND p.Estado = 'ACTIVO'
+GROUP BY p.ID_Producto, p.Nombre, p.Cantidad_Inventario
+ORDER BY p.Cantidad_Inventario ASC;
+
+-- 6.2 Productos sin movimiento en los últimos 60 días
+SELECT
+    p.ID_Producto,
+    p.Nombre,
+    p.Cantidad_Inventario,
+    p.Precio,
+    (p.Cantidad_Inventario * p.Precio) AS Valor_Inventario_Inmovilizado,
+    'ALERTA: Producto sin movimiento' AS Mensaje
+FROM Productos p
+WHERE p.ID_Producto NOT IN (
+    SELECT DISTINCT t.ID_Producto
+    FROM Transacciones t
+    WHERE t.Fecha >= DATE_SUB(CURDATE(), INTERVAL 60 DAY)
+)
+AND p.Estado = 'ACTIVO'
+AND p.Cantidad_Inventario > 0
+ORDER BY Valor_Inventario_Inmovilizado DESC;
+
+-- ================================================
+-- MANEJO DE TRANSACCIONES SQL
+-- Sistema de Gestión de Inventario
+-- ================================================
+-- ================================================
+-- 1. TRANSACCIÓN PARA COMPRA DE PRODUCTOS
+-- ================================================
+
+DELIMITER //
+
+CREATE PROCEDURE sp_RegistrarCompra(
+    IN p_id_producto INT,
+    IN p_id_proveedor INT,
+    IN p_cantidad INT,
+    IN p_precio_unitario DECIMAL(10,2),
+    IN p_observaciones TEXT,
+    OUT p_resultado VARCHAR(100),
+    OUT p_id_transaccion INT
+)
+BEGIN
+    DECLARE v_error_count INT DEFAULT 0;
+    DECLARE v_error_msg VARCHAR(255);
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        SET p_resultado = CONCAT('ERROR: ', v_error_msg);
+        SET p_id_transaccion = 0;
+    END;
+
+    START TRANSACTION;
+
+    IF p_cantidad <= 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La cantidad debe ser mayor a cero';
+    END IF;
+
+    IF p_precio_unitario <= 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'El precio debe ser mayor a cero';
+    END IF;
+
+    SELECT COUNT(*) INTO v_error_count
+    FROM Productos
+    WHERE ID_Producto = p_id_producto AND Estado = 'ACTIVO';
+
+    IF v_error_count = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Producto no encontrado o inactivo';
+    END IF;
+
+    -- Verificar que el proveedor existe y está activo
+    SELECT COUNT(*) INTO v_error_count
+    FROM Proveedores
+    WHERE ID_Proveedor = p_id_proveedor AND Estado = 'ACTIVO';
+
+    IF v_error_count = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Proveedor no encontrado o inactivo';
+    END IF;
+
+    -- Registrar la transacción de compra
+    INSERT INTO Transacciones (
+        ID_Producto,
+        ID_Proveedor,
+        Tipo,
+        Cantidad,
+        Precio_Unitario,
+        Observaciones
+    ) VALUES (
+        p_id_producto,
+        p_id_proveedor,
+        'COMPRA',
+        p_cantidad,
+        p_precio_unitario,
+        p_observaciones
+    );
+
+    SET p_id_transaccion = LAST_INSERT_ID();
+
+    COMMIT;
+
+    SET p_resultado = 'Compra registrada exitosamente';
+
+END//
+
+-- ================================================
+-- 2. TRANSACCIÓN PARA VENTA DE PRODUCTOS
+-- ================================================
+
+
+
+CREATE PROCEDURE sp_RegistrarVenta(
+    IN p_id_producto INT,
+    IN p_id_proveedor INT,
+    IN p_cantidad INT,
+    IN p_precio_unitario DECIMAL(10,2),
+    IN p_observaciones TEXT,
+    OUT p_resultado VARCHAR(100),
+    OUT p_id_transaccion INT
+)
+BEGIN
+    DECLARE v_stock_actual INT;
+    DECLARE v_error_msg VARCHAR(255);
+
+    -- Handler para capturar errores SQL y hacer rollback
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        SET p_resultado = CONCAT('ERROR: ', v_error_msg);
+        SET p_id_transaccion = 0;
+    END;
+
+    -- Validaciones de parámetros de entrada
+    IF p_cantidad <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'La cantidad debe ser mayor a cero';
+    END IF;
+
+    IF p_precio_unitario <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'El precio debe ser mayor a cero';
+    END IF;
+
+    START TRANSACTION;
+
+    -- Verificar si el producto existe y está activo
+    SELECT Cantidad_Inventario INTO v_stock_actual
+    FROM Productos
+    WHERE ID_Producto = p_id_producto AND Estado = 'ACTIVO'
+    FOR UPDATE;
+
+    IF v_stock_actual IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Producto no encontrado o inactivo';
+    END IF;
+
+    -- Validar stock suficiente
+    IF v_stock_actual < p_cantidad THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = CONCAT('Stock insuficiente. Disponible: ', v_stock_actual, ', Solicitado: ', p_cantidad);
+    END IF;
+
+    -- Insertar transacción como VENTA
+    INSERT INTO Transacciones (
+        ID_Producto,
+        ID_Proveedor,
+        Tipo,
+        Cantidad,
+        Precio_Unitario,
+        Observaciones
+    ) VALUES (
+        p_id_producto,
+        p_id_proveedor,
+        'VENTA',
+        p_cantidad,
+        p_precio_unitario,
+        p_observaciones
+    );
+
+    SET p_id_transaccion = LAST_INSERT_ID();
+
+    -- Descontar stock
+    UPDATE Productos
+    SET Cantidad_Inventario = Cantidad_Inventario - p_cantidad
+    WHERE ID_Producto = p_id_producto;
+
+    COMMIT;
+
+    SET p_resultado = 'Venta registrada exitosamente';
+
+
+
+
+-- ================================================
+-- 3. TRANSACCIÓN COMPLEJA: TRANSFERENCIA ENTRE PROVEEDORES
+-- ================================================
+
+CREATE PROCEDURE sp_TransferirProductoProveedor(
+    IN p_id_producto INT,
+    IN p_id_proveedor_origen INT,
+    IN p_id_proveedor_destino INT,
+    IN p_cantidad INT,
+    IN p_precio_transferencia DECIMAL(10,2),
+    OUT p_resultado VARCHAR(200)
+)
+BEGIN
+    DECLARE v_stock_actual INT;
+    DECLARE v_id_venta INT;
+    DECLARE v_id_compra INT;
+    DECLARE v_error_msg VARCHAR(255);
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        SET p_resultado = CONCAT('ERROR en transferencia: ', v_error_msg);
+    END;
+
+    -- Iniciar transacción
+    START TRANSACTION;
+
+    -- Validar stock suficiente
+    SELECT Cantidad_Inventario INTO v_stock_actual
+    FROM Productos
+    WHERE ID_Producto = p_id_producto;
+
+    IF v_stock_actual < p_cantidad THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Stock insuficiente para transferencia';
+    END IF;
+
+    -- Registrar venta al proveedor origen
+    INSERT INTO Transacciones (
+        ID_Producto, ID_Proveedor, Tipo, Cantidad,
+        Precio_Unitario, Observaciones
+    ) VALUES (
+        p_id_producto, p_id_proveedor_origen, 'VENTA', p_cantidad,
+        p_precio_transferencia, 'Transferencia - Salida'
+    );
+    SET v_id_venta = LAST_INSERT_ID();
+
+    -- Registrar compra del proveedor destino
+    INSERT INTO Transacciones (
+        ID_Producto, ID_Proveedor, Tipo, Cantidad,
+        Precio_Unitario, Observaciones
+    ) VALUES (
+        p_id_producto, p_id_proveedor_destino, 'COMPRA', p_cantidad,
+        p_precio_transferencia, 'Transferencia - Entrada'
+    );
+    SET v_id_compra = LAST_INSERT_ID();
+
+    -- Confirmar transacción
+    COMMIT;
+
+    SET p_resultado = CONCAT('Transferencia exitosa. Venta ID: ', v_id_venta, ', Compra ID: ', v_id_compra);
+
+END//
+
+
+
+-- ================================================
+-- 4. EJEMPLOS DE USO DE LAS TRANSACCIONES
+-- ================================================
+
+-- Ejemplo 1: Registrar una compra
+CALL sp_RegistrarCompra(
+    1,                    -- ID Producto (Laptop Dell)
+    1,                    -- ID Proveedor (TechSupply SA)
+    5,                    -- Cantidad
+    780000.00,            -- Precio unitario
+    'Compra adicional para stock',  -- Observaciones
+    @resultado,           -- Variable de salida para resultado
+    @id_transaccion       -- Variable de salida para ID de transacción
+);
+
+SELECT @resultado AS Resultado, @id_transaccion AS ID_Transaccion;
+
+-- Ejemplo 2: Registrar una venta
+CALL sp_RegistrarVenta(
+    2,                    -- ID Producto (Mouse Logitech)
+    1,                    -- ID Proveedor
+    10,                   -- Cantidad
+    25000.00,             -- Precio unitario
+    'Venta corporativa - Lote grande',  -- Observaciones
+    @resultado_venta,     -- Variable de salida
+    @id_venta            -- Variable de salida
+);
+
+SELECT @resultado_venta AS Resultado_Venta, @id_venta AS ID_Venta;
+
+-- Ejemplo 3: Intento de venta con stock insuficiente (debe fallar)
+CALL sp_RegistrarVenta(
+    1,                    -- ID Producto (Laptop Dell)
+    1,                    -- ID Proveedor
+    100,                  -- Cantidad (mayor al stock disponible)
+    850000.00,            -- Precio unitario
+    'Venta grande - debe fallar',  -- Observaciones
+    @resultado_error,     -- Variable de salida
+    @id_error            -- Variable de salida
+);
+
+SELECT @resultado_error AS Resultado_Error, @id_error AS ID_Error;
+
+-- ================================================
+-- 5. VERIFICACIÓN DE INTEGRIDAD DESPUÉS DE TRANSACCIONES
+-- ================================================
+
+-- Consulta para verificar el estado actual del inventario
+SELECT
+    p.Nombre AS Producto,
+    p.Cantidad_Inventario AS Stock_Actual,
+    COALESCE(SUM(CASE WHEN t.Tipo = 'COMPRA' THEN t.Cantidad ELSE 0 END), 0) AS Total_Compras,
+    COALESCE(SUM(CASE WHEN t.Tipo = 'VENTA' THEN t.Cantidad ELSE 0 END), 0) AS Total_Ventas,
+    (COALESCE(SUM(CASE WHEN t.Tipo = 'COMPRA' THEN t.Cantidad ELSE 0 END), 0) -
+     COALESCE(SUM(CASE WHEN t.Tipo = 'VENTA' THEN t.Cantidad ELSE 0 END), 0)) AS Stock_Calculado,
+    CASE
+        WHEN p.Cantidad_Inventario = (COALESCE(SUM(CASE WHEN t.Tipo = 'COMPRA' THEN t.Cantidad ELSE 0 END), 0) -
+                                      COALESCE(SUM(CASE WHEN t.Tipo = 'VENTA' THEN t.Cantidad ELSE 0 END), 0))
+        THEN 'CORRECTO'
+        ELSE 'INCONSISTENCIA'
+    END AS Estado_Integridad
+FROM Productos p
+LEFT JOIN Transacciones t ON p.ID_Producto = t.ID_Producto
+WHERE p.Estado = 'ACTIVO'
+GROUP BY p.ID_Producto, p.Nombre, p.Cantidad_Inventario
+ORDER BY p.Nombre;
+    End;
