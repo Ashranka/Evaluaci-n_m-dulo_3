@@ -567,7 +567,6 @@ ORDER BY Valor_Inventario_Inmovilizado DESC;
 
 -- ================================================
 -- MANEJO DE TRANSACCIONES SQL
--- Sistema de Gestión de Inventario
 -- ================================================
 -- ================================================
 -- 1. TRANSACCIÓN PARA COMPRA DE PRODUCTOS
@@ -575,6 +574,7 @@ ORDER BY Valor_Inventario_Inmovilizado DESC;
 
 DELIMITER //
 
+-- Procedimiento para registrar compras de productos
 CREATE PROCEDURE sp_RegistrarCompra(
     IN p_id_producto INT,
     IN p_id_proveedor INT,
@@ -587,6 +587,8 @@ CREATE PROCEDURE sp_RegistrarCompra(
 BEGIN
     DECLARE v_error_count INT DEFAULT 0;
     DECLARE v_error_msg VARCHAR(255);
+
+    -- Manejador de errores para hacer rollback si algo sale mal
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         GET DIAGNOSTICS CONDITION 1
@@ -598,14 +600,17 @@ BEGIN
 
     START TRANSACTION;
 
+    -- Validacion de cantidad positiva
     IF p_cantidad <= 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La cantidad debe ser mayor a cero';
     END IF;
 
+    -- Validacion de precio positivo
     IF p_precio_unitario <= 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'El precio debe ser mayor a cero';
     END IF;
 
+    -- Verificar que el producto existe y esta activo
     SELECT COUNT(*) INTO v_error_count
     FROM Productos
     WHERE ID_Producto = p_id_producto AND Estado = 'ACTIVO';
@@ -614,7 +619,7 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Producto no encontrado o inactivo';
     END IF;
 
-    -- Verificar que el proveedor existe y está activo
+    -- Verificar que el proveedor existe y esta activo
     SELECT COUNT(*) INTO v_error_count
     FROM Proveedores
     WHERE ID_Proveedor = p_id_proveedor AND Estado = 'ACTIVO';
@@ -623,7 +628,7 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Proveedor no encontrado o inactivo';
     END IF;
 
-    -- Registrar la transacción de compra
+    -- Insertar la transaccion de compra
     INSERT INTO Transacciones (
         ID_Producto,
         ID_Proveedor,
@@ -640,6 +645,7 @@ BEGIN
         p_observaciones
     );
 
+    -- Obtener el ID de la transaccion recien creada
     SET p_id_transaccion = LAST_INSERT_ID();
 
     COMMIT;
@@ -648,11 +654,85 @@ BEGIN
 
 END//
 
+DELIMITER ;
+
 -- ================================================
--- 2. TRANSACCIÓN PARA VENTA DE PRODUCTOS
+-- PROCEDIMIENTO PARA VENTAS DE PRODUCTOS
 -- ================================================
 
+-- ================================================
+-- TRANSACCION COMPLEJA: TRANSFERENCIA ENTRE PROVEEDORES
+-- ================================================
 
+DELIMITER //
+
+CREATE PROCEDURE sp_TransferirProductoProveedor(
+    IN p_id_producto INT,
+    IN p_id_proveedor_origen INT,
+    IN p_id_proveedor_destino INT,
+    IN p_cantidad INT,
+    IN p_precio_transferencia DECIMAL(10,2),
+    OUT p_resultado VARCHAR(200)
+)
+BEGIN
+    DECLARE v_stock_actual INT;
+    DECLARE v_id_venta INT;
+    DECLARE v_id_compra INT;
+    DECLARE v_error_msg VARCHAR(255);
+
+    -- Manejo de errores con rollback automatico
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        SET p_resultado = CONCAT('ERROR en transferencia: ', v_error_msg);
+    END;
+
+    START TRANSACTION;
+
+    -- Verificar stock suficiente para la transferencia
+    SELECT Cantidad_Inventario INTO v_stock_actual
+    FROM Productos
+    WHERE ID_Producto = p_id_producto;
+
+    IF v_stock_actual < p_cantidad THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Stock insuficiente para transferencia';
+    END IF;
+
+    -- Registrar salida del proveedor origen (como venta)
+    INSERT INTO Transacciones (
+        ID_Producto, ID_Proveedor, Tipo, Cantidad,
+        Precio_Unitario, Observaciones
+    ) VALUES (
+        p_id_producto, p_id_proveedor_origen, 'VENTA', p_cantidad,
+        p_precio_transferencia, 'Transferencia - Salida'
+    );
+    SET v_id_venta = LAST_INSERT_ID();
+
+    -- Registrar entrada al proveedor destino (como compra)
+    INSERT INTO Transacciones (
+        ID_Producto, ID_Proveedor, Tipo, Cantidad,
+        Precio_Unitario, Observaciones
+    ) VALUES (
+        p_id_producto, p_id_proveedor_destino, 'COMPRA', p_cantidad,
+        p_precio_transferencia, 'Transferencia - Entrada'
+    );
+    SET v_id_compra = LAST_INSERT_ID();
+
+    -- Confirmar todas las operaciones
+    COMMIT;
+
+    SET p_resultado = CONCAT('Transferencia exitosa. Venta ID: ', v_id_venta, ', Compra ID: ', v_id_compra);
+
+END//
+
+DELIMITER ;
+
+
+
+
+DELIMITER //
 
 CREATE PROCEDURE sp_RegistrarVenta(
     IN p_id_producto INT,
@@ -667,7 +747,7 @@ BEGIN
     DECLARE v_stock_actual INT;
     DECLARE v_error_msg VARCHAR(255);
 
-    -- Handler para capturar errores SQL y hacer rollback
+    -- Capturar errores y hacer rollback automatico
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         GET DIAGNOSTICS CONDITION 1
@@ -677,7 +757,7 @@ BEGIN
         SET p_id_transaccion = 0;
     END;
 
-    -- Validaciones de parámetros de entrada
+    -- Validaciones basicas de entrada
     IF p_cantidad <= 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'La cantidad debe ser mayor a cero';
@@ -690,24 +770,25 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Verificar si el producto existe y está activo
+    -- Obtener stock actual del producto (con bloqueo para evitar problemas de concurrencia)
     SELECT Cantidad_Inventario INTO v_stock_actual
     FROM Productos
     WHERE ID_Producto = p_id_producto AND Estado = 'ACTIVO'
     FOR UPDATE;
 
+    -- Verificar si el producto existe
     IF v_stock_actual IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Producto no encontrado o inactivo';
     END IF;
 
-    -- Validar stock suficiente
+    -- Validar que hay suficiente stock
     IF v_stock_actual < p_cantidad THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = CONCAT('Stock insuficiente. Disponible: ', v_stock_actual, ', Solicitado: ', p_cantidad);
+        SET v_error_msg = CONCAT('Stock insuficiente. Disponible: ', v_stock_actual, ', Solicitado: ', p_cantidad);
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
     END IF;
 
-    -- Insertar transacción como VENTA
+    -- Registrar la venta en transacciones
     INSERT INTO Transacciones (
         ID_Producto,
         ID_Proveedor,
@@ -726,7 +807,7 @@ BEGIN
 
     SET p_id_transaccion = LAST_INSERT_ID();
 
-    -- Descontar stock
+    -- Actualizar inventario restando la cantidad vendida
     UPDATE Productos
     SET Cantidad_Inventario = Cantidad_Inventario - p_cantidad
     WHERE ID_Producto = p_id_producto;
@@ -735,123 +816,60 @@ BEGIN
 
     SET p_resultado = 'Venta registrada exitosamente';
 
-
-
-
--- ================================================
--- 3. TRANSACCIÓN COMPLEJA: TRANSFERENCIA ENTRE PROVEEDORES
--- ================================================
-
-CREATE PROCEDURE sp_TransferirProductoProveedor(
-    IN p_id_producto INT,
-    IN p_id_proveedor_origen INT,
-    IN p_id_proveedor_destino INT,
-    IN p_cantidad INT,
-    IN p_precio_transferencia DECIMAL(10,2),
-    OUT p_resultado VARCHAR(200)
-)
-BEGIN
-    DECLARE v_stock_actual INT;
-    DECLARE v_id_venta INT;
-    DECLARE v_id_compra INT;
-    DECLARE v_error_msg VARCHAR(255);
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION
-    BEGIN
-        GET DIAGNOSTICS CONDITION 1
-            v_error_msg = MESSAGE_TEXT;
-        ROLLBACK;
-        SET p_resultado = CONCAT('ERROR en transferencia: ', v_error_msg);
-    END;
-
-    -- Iniciar transacción
-    START TRANSACTION;
-
-    -- Validar stock suficiente
-    SELECT Cantidad_Inventario INTO v_stock_actual
-    FROM Productos
-    WHERE ID_Producto = p_id_producto;
-
-    IF v_stock_actual < p_cantidad THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Stock insuficiente para transferencia';
-    END IF;
-
-    -- Registrar venta al proveedor origen
-    INSERT INTO Transacciones (
-        ID_Producto, ID_Proveedor, Tipo, Cantidad,
-        Precio_Unitario, Observaciones
-    ) VALUES (
-        p_id_producto, p_id_proveedor_origen, 'VENTA', p_cantidad,
-        p_precio_transferencia, 'Transferencia - Salida'
-    );
-    SET v_id_venta = LAST_INSERT_ID();
-
-    -- Registrar compra del proveedor destino
-    INSERT INTO Transacciones (
-        ID_Producto, ID_Proveedor, Tipo, Cantidad,
-        Precio_Unitario, Observaciones
-    ) VALUES (
-        p_id_producto, p_id_proveedor_destino, 'COMPRA', p_cantidad,
-        p_precio_transferencia, 'Transferencia - Entrada'
-    );
-    SET v_id_compra = LAST_INSERT_ID();
-
-    -- Confirmar transacción
-    COMMIT;
-
-    SET p_resultado = CONCAT('Transferencia exitosa. Venta ID: ', v_id_venta, ', Compra ID: ', v_id_compra);
-
 END//
 
-
-
+DELIMITER ;
 -- ================================================
--- 4. EJEMPLOS DE USO DE LAS TRANSACCIONES
+-- EJEMPLOS DE USO
 -- ================================================
 
 -- Ejemplo 1: Registrar una compra
 CALL sp_RegistrarCompra(
-    1,                    -- ID Producto (Laptop Dell)
-    1,                    -- ID Proveedor (TechSupply SA)
-    5,                    -- Cantidad
-    780000.00,            -- Precio unitario
+    1,                    -- ID del producto
+    1,                    -- ID del proveedor
+    5,                    -- Cantidad a comprar
+    780000.00,            -- Precio por unidad
     'Compra adicional para stock',  -- Observaciones
-    @resultado,           -- Variable de salida para resultado
-    @id_transaccion       -- Variable de salida para ID de transacción
+    @resultado,           -- Variable para el resultado
+    @id_transaccion       -- Variable para el ID de transaccion
 );
 
+-- Ver resultado de la compra
 SELECT @resultado AS Resultado, @id_transaccion AS ID_Transaccion;
 
 -- Ejemplo 2: Registrar una venta
 CALL sp_RegistrarVenta(
-    2,                    -- ID Producto (Mouse Logitech)
-    1,                    -- ID Proveedor
-    10,                   -- Cantidad
-    25000.00,             -- Precio unitario
+    2,                    -- ID del producto
+    1,                    -- ID del proveedor
+    10,                   -- Cantidad a vender
+    25000.00,             -- Precio por unidad
     'Venta corporativa - Lote grande',  -- Observaciones
-    @resultado_venta,     -- Variable de salida
-    @id_venta            -- Variable de salida
+    @resultado_venta,     -- Variable para resultado
+    @id_venta            -- Variable para ID de venta
 );
 
+-- Ver resultado de la venta
 SELECT @resultado_venta AS Resultado_Venta, @id_venta AS ID_Venta;
 
 -- Ejemplo 3: Intento de venta con stock insuficiente (debe fallar)
 CALL sp_RegistrarVenta(
-    1,                    -- ID Producto (Laptop Dell)
-    1,                    -- ID Proveedor
-    100,                  -- Cantidad (mayor al stock disponible)
-    850000.00,            -- Precio unitario
+    1,                    -- ID del producto
+    1,                    -- ID del proveedor
+    100,                  -- Cantidad excesiva
+    850000.00,            -- Precio por unidad
     'Venta grande - debe fallar',  -- Observaciones
-    @resultado_error,     -- Variable de salida
-    @id_error            -- Variable de salida
+    @resultado_error,     -- Variable para error
+    @id_error            -- Variable para ID
 );
 
+-- Ver el error
 SELECT @resultado_error AS Resultado_Error, @id_error AS ID_Error;
 
 -- ================================================
--- 5. VERIFICACIÓN DE INTEGRIDAD DESPUÉS DE TRANSACCIONES
+-- VERIFICACION DE INTEGRIDAD DE DATOS
 -- ================================================
 
--- Consulta para verificar el estado actual del inventario
+-- Consulta para verificar la consistencia del inventario
 SELECT
     p.Nombre AS Producto,
     p.Cantidad_Inventario AS Stock_Actual,
@@ -870,4 +888,297 @@ LEFT JOIN Transacciones t ON p.ID_Producto = t.ID_Producto
 WHERE p.Estado = 'ACTIVO'
 GROUP BY p.ID_Producto, p.Nombre, p.Cantidad_Inventario
 ORDER BY p.Nombre;
-    End;
+
+-- ================================================
+-- RESTRICCIONES DE INTEGRIDAD
+-- ================================================
+
+-- Restricciones para la tabla productos
+ALTER TABLE Productos
+ADD CONSTRAINT chk_precio_positivo
+    CHECK (Precio > 0),
+ADD CONSTRAINT chk_inventario_no_negativo
+    CHECK (Cantidad_Inventario >= 0),
+ADD CONSTRAINT chk_nombre_no_vacio
+    CHECK (TRIM(Nombre) != '');
+
+-- Restricciones para proveedores
+ALTER TABLE Proveedores
+ADD CONSTRAINT chk_telefono_formato
+    CHECK (Telefono REGEXP '^[+]?[0-9\-\s()]+$'),
+ADD CONSTRAINT chk_nombre_proveedor_no_vacio
+    CHECK (TRIM(Nombre) != '');
+
+
+-- Restricciones para relacion producto-proveedor
+ALTER TABLE Producto_Proveedor
+ADD CONSTRAINT chk_precio_proveedor_positivo
+    CHECK (Precio_Proveedor > 0),
+ADD CONSTRAINT chk_tiempo_entrega_valido
+    CHECK (Tiempo_Entrega IS NULL OR Tiempo_Entrega > 0);
+
+-- ================================================
+-- FUNCIONES AUXILIARES
+-- ================================================
+
+DELIMITER //
+
+-- Funcion para validar formato de email (no muy sofisticada pero funciona)
+CREATE FUNCTION fn_ValidarEmail(email VARCHAR(100))
+RETURNS BOOLEAN
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+    DECLARE es_valido BOOLEAN DEFAULT FALSE;
+
+    -- Expresion regular basica para email
+    IF email REGEXP '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' THEN
+        SET es_valido = TRUE;
+    END IF;
+
+    RETURN es_valido;
+END//
+
+-- Funcion para calcular margenes de ganancia
+CREATE FUNCTION fn_CalcularMargen(precio_venta DECIMAL(10,2), precio_costo DECIMAL(10,2))
+RETURNS DECIMAL(5,2)
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+    DECLARE margen DECIMAL(5,2) DEFAULT 0.00;
+
+    -- Calcular porcentaje de margen solo si los precios son validos
+    IF precio_costo > 0 AND precio_venta > precio_costo THEN
+        SET margen = ROUND(((precio_venta - precio_costo) / precio_costo) * 100, 2);
+    END IF;
+
+    RETURN margen;
+END//
+
+-- Funcion para verificar si hay stock suficiente
+CREATE FUNCTION fn_ValidarStockMinimo(id_producto INT, cantidad_venta INT)
+RETURNS BOOLEAN
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+    DECLARE stock_actual INT DEFAULT 0;
+    DECLARE es_valido BOOLEAN DEFAULT FALSE;
+
+    -- Obtener stock actual del producto
+    SELECT Cantidad_Inventario INTO stock_actual
+    FROM Productos
+    WHERE ID_Producto = id_producto;
+
+    -- Verificar si hay suficiente stock
+    IF stock_actual >= cantidad_venta THEN
+        SET es_valido = TRUE;
+    END IF;
+
+    RETURN es_valido;
+END//
+
+DELIMITER ;
+
+-- ================================================
+-- 4. TRIGGERS PARA MANTENER INTEGRIDAD
+-- ================================================
+
+DELIMITER //
+
+-- Trigger para validar email antes de insertar proveedor
+CREATE TRIGGER tr_validar_email_proveedor
+    BEFORE INSERT ON Proveedores
+    FOR EACH ROW
+BEGIN
+    IF NEW.Email IS NOT NULL AND NOT fn_ValidarEmail(NEW.Email) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Formato de email inválido';
+    END IF;
+END//
+
+-- Trigger para validar email antes de actualizar proveedor
+CREATE TRIGGER tr_validar_email_proveedor_update
+    BEFORE UPDATE ON Proveedores
+    FOR EACH ROW
+BEGIN
+    IF NEW.Email IS NOT NULL AND NOT fn_ValidarEmail(NEW.Email) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Formato de email inválido';
+    END IF;
+END//
+
+-- Trigger para prevenir eliminación de productos con transacciones
+CREATE TRIGGER tr_prevenir_eliminacion_producto
+    BEFORE DELETE ON Productos
+    FOR EACH ROW
+BEGIN
+    DECLARE num_transacciones INT DEFAULT 0;
+
+    SELECT COUNT(*) INTO num_transacciones
+    FROM Transacciones
+    WHERE ID_Producto = OLD.ID_Producto;
+
+    IF num_transacciones > 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No se puede eliminar producto con transacciones asociadas';
+    END IF;
+END//
+
+-- Trigger para registrar cambios en precios de productos
+CREATE TRIGGER tr_registrar_cambio_precio
+    AFTER UPDATE ON Productos
+    FOR EACH ROW
+BEGIN
+    IF OLD.Precio != NEW.Precio THEN
+        INSERT INTO Log_Cambios_Precios (
+            ID_Producto,
+            Precio_Anterior,
+            Precio_Nuevo,
+            Fecha_Cambio,
+            Usuario
+        ) VALUES (
+            NEW.ID_Producto,
+            OLD.Precio,
+            NEW.Precio,
+            NOW(),
+            USER()
+        );
+    END IF;
+END//
+
+DELIMITER ;
+
+-- ================================================
+-- 5. TABLA DE LOG PARA AUDITORIA
+-- ================================================
+
+CREATE TABLE Log_Cambios_Precios (
+    ID_Log INT AUTO_INCREMENT PRIMARY KEY,
+    ID_Producto INT NOT NULL,
+    Precio_Anterior DECIMAL(10,2) NOT NULL,
+    Precio_Nuevo DECIMAL(10,2) NOT NULL,
+    Fecha_Cambio DATETIME NOT NULL,
+    Usuario VARCHAR(100) NOT NULL,
+
+    FOREIGN KEY (ID_Producto) REFERENCES Productos(ID_Producto)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+
+    INDEX idx_fecha_cambio (Fecha_Cambio),
+    INDEX idx_producto_log (ID_Producto)
+);
+
+-- ================================================
+-- 6. PROCEDIMIENTOS PARA MANEJO DE EXCEPCIONES
+-- ================================================
+
+DELIMITER //
+
+-- Procedimiento con manejo completo de errores
+CREATE PROCEDURE sp_ActualizarPrecioProducto(
+    IN p_id_producto INT,
+    IN p_precio_nuevo DECIMAL(10,2),
+    OUT p_resultado VARCHAR(200)
+)
+BEGIN
+    DECLARE v_precio_actual DECIMAL(10,2);
+    DECLARE v_nombre_producto VARCHAR(100);
+    DECLARE v_error_msg VARCHAR(255);
+
+    -- Handler para manejar excepciones
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        SET p_resultado = CONCAT('ERROR: ', v_error_msg);
+    END;
+
+    -- Iniciar transacción
+    START TRANSACTION;
+
+    -- Validaciones
+    IF p_precio_nuevo <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'El precio debe ser mayor a cero';
+    END IF;
+
+    -- Obtener información actual del producto
+    SELECT Precio, Nombre INTO v_precio_actual, v_nombre_producto
+    FROM Productos
+    WHERE ID_Producto = p_id_producto AND Estado = 'ACTIVO';
+
+    IF v_precio_actual IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Producto no encontrado o inactivo';
+    END IF;
+
+    -- Verificar si el cambio es significativo (más del 20%)
+    IF ABS(p_precio_nuevo - v_precio_actual) / v_precio_actual > 0.20 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Cambio de precio superior al 20% no permitido sin autorización';
+    END IF;
+
+    -- Actualizar precio
+    UPDATE Productos
+    SET Precio = p_precio_nuevo
+    WHERE ID_Producto = p_id_producto;
+
+    -- Confirmar transacción
+    COMMIT;
+
+    SET p_resultado = CONCAT('Precio actualizado exitosamente para: ', v_nombre_producto,
+                           '. Precio anterior: $', FORMAT(v_precio_actual, 0),
+                           ', Precio nuevo: $', FORMAT(p_precio_nuevo, 0));
+END//
+
+DELIMITER ;
+
+-- ================================================
+-- 7. EJEMPLOS DE USO Y PRUEBAS
+-- ================================================
+
+-- Ejemplo 1: Actualizar precio válido
+CALL sp_ActualizarPrecioProducto(1, 900000.00, @resultado);
+SELECT @resultado;
+
+-- Ejemplo 2: Intentar precio inválido (debe fallar)
+CALL sp_ActualizarPrecioProducto(1, -5000.00, @resultado_error);
+SELECT @resultado_error;
+
+-- Ejemplo 3: Verificar log de cambios
+SELECT
+    lcp.*,
+    p.Nombre AS Producto
+FROM Log_Cambios_Precios lcp
+INNER JOIN Productos p ON lcp.ID_Producto = p.ID_Producto
+ORDER BY lcp.Fecha_Cambio DESC;
+
+-- ================================================
+-- 8. CONSULTA DE VALIDACIÓN DE INTEGRIDAD
+-- ================================================
+
+-- Verificar que todas las restricciones se cumplen
+SELECT
+    'Productos con precio válido' AS Validacion,
+    COUNT(*) AS Total,
+    SUM(CASE WHEN Precio > 0 THEN 1 ELSE 0 END) AS Validos,
+    SUM(CASE WHEN Precio <= 0 THEN 1 ELSE 0 END) AS Invalidos
+FROM Productos
+
+UNION ALL
+
+SELECT
+    'Productos con inventario válido' AS Validacion,
+    COUNT(*) AS Total,
+    SUM(CASE WHEN Cantidad_Inventario >= 0 THEN 1 ELSE 0 END) AS Validos,
+    SUM(CASE WHEN Cantidad_Inventario < 0 THEN 1 ELSE 0 END) AS Invalidos
+FROM Productos
+
+UNION ALL
+
+SELECT
+    'Proveedores con email válido' AS Validacion,
+    COUNT(*) AS Total,
+    SUM(CASE WHEN Email IS NULL OR fn_ValidarEmail(Email) THEN 1 ELSE 0 END) AS Validos,
+    SUM(CASE WHEN Email IS NOT NULL AND NOT fn_ValidarEmail(Email) THEN 1 ELSE 0 END) AS Invalidos
+FROM Proveedores;
